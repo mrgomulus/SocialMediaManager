@@ -5,7 +5,14 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import UUID
 
-from .models import Account, Post, PostStatus
+from .models import (
+    Account,
+    ContentTemplate,
+    HashtagGroup,
+    Post,
+    PostStatus,
+    PostingTimeSlot,
+)
 
 
 class InMemoryAccountRepository:
@@ -53,3 +60,49 @@ class InMemoryPostRepository:
         updated = replace(post, status=PostStatus.FAILED, error_message=error)
         self._items[updated.id] = updated
         return updated
+
+
+class InMemoryTemplateRepository:
+    def __init__(self) -> None:
+        self._items: Dict[UUID, ContentTemplate] = {}
+
+    def add(self, template: ContentTemplate) -> ContentTemplate:
+        self._items[template.id] = template
+        return template
+
+    def update(self, template: ContentTemplate) -> ContentTemplate:
+        self._items[template.id] = template
+        return template
+
+    def get(self, template_id: UUID) -> Optional[ContentTemplate]:
+        return self._items.get(template_id)
+
+    def list_all(self) -> List[ContentTemplate]:
+        return list(self._items.values())
+
+
+class InMemoryHashtagGroupRepository:
+    def __init__(self) -> None:
+        self._items: Dict[UUID, HashtagGroup] = {}
+
+    def add(self, group: HashtagGroup) -> HashtagGroup:
+        self._items[group.id] = group
+        return group
+
+    def get(self, group_id: UUID) -> Optional[HashtagGroup]:
+        return self._items.get(group_id)
+
+    def list_all(self) -> List[HashtagGroup]:
+        return list(self._items.values())
+
+
+class InMemoryPostingSlotRepository:
+    def __init__(self) -> None:
+        self._items: Dict[UUID, List[PostingTimeSlot]] = {}
+
+    def replace_for_account(self, account_id: UUID, slots: List[PostingTimeSlot]) -> List[PostingTimeSlot]:
+        self._items[account_id] = sorted(slots, key=lambda s: (s.weekday, s.hour, s.minute))
+        return self._items[account_id]
+
+    def list_for_account(self, account_id: UUID) -> List[PostingTimeSlot]:
+        return list(self._items.get(account_id, []))
