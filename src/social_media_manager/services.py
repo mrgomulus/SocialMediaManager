@@ -13,8 +13,12 @@ from .models import (
     PostStatus,
     PostingTimeSlot,
     Provider,
+    VideoGenerationJob,
+    VideoJobStatus,
+    VideoProvider,
 )
 from .providers import ProviderRegistry
+from .providers import AiVideoClientRegistry
 
 MAX_RETRIES = 3
 MAX_CONTENT_LENGTH = 280
@@ -459,3 +463,108 @@ class AnalyticsService:
             "upcoming_posts_24h": upcoming_posts_24h,
             "by_provider": by_provider,
         }
+
+
+class VideoGenerationService:
+    """Orchestrates AI video generation and automatic upload to social media accounts."""
+
+    MAX_CAPTION_LENGTH = 500
+
+    def __init__(
+        self,
+        video_job_repo,
+        ai_video_registry: AiVideoClientRegistry,
+        campaign_service: CampaignService,
+    ) -> None:
+        self.video_job_repo = video_job_repo
+        self.ai_video_registry = ai_video_registry
+        self.campaign_service = campaign_service
+
+    def create_job(
+        self,
+        *,
+        prompt: str,
+        account_ids: list[UUID],
+        post_caption: str,
+        video_provider: VideoProvider,
+        scheduled_at: datetime,
+    ) -> VideoGenerationJob:
+        cleaned_prompt = prompt.strip()
+        if not cleaned_prompt:
+            raise ValueError("Prompt must not be empty")
+        if not account_ids:
+            raise ValueError("At least one account id is required")
+        cleaned_caption = post_caption.strip()
+        if not cleaned_caption:
+            raise ValueError("Post caption must not be empty")
+        if len(cleaned_caption) > self.MAX_CAPTION_LENGTH:
+            raise ValueError(f"Post caption must be <= {self.MAX_CAPTION_LENGTH} characters")
+        if scheduled_at <= datetime.utcnow():
+            raise ValueError("Scheduled time must be in the future")
+
+        client = self.ai_video_registry.get(video_provider)
+        result = client.submit_job(cleaned_prompt)
+
+        if not result.success:
+            job = VideoGenerationJob(
+                prompt=cleaned_prompt,
+                account_ids=list(account_ids),
+                post_caption=cleaned_caption,
+                video_provider=video_provider,
+                scheduled_at=scheduled_at,
+                status=VideoJobStatus.FAILED,
+                error_message=result.error_message,
+            )
+        else:
+            job = VideoGenerationJob(
+                prompt=cleaned_prompt,
+                account_ids=list(account_ids),
+                post_caption=cleaned_caption,
+                video_provider=video_provider,
+                scheduled_at=scheduled_at,
+                status=VideoJobStatus.PROCESSING,
+                external_job_id=result.external_job_id,
+            )
+        return self.video_job_repo.add(job)
+
+    def poll_and_process_jobs(self, now: datetime) -> list[VideoGenerationJob]:
+        updated: list[VideoGenerationJob] = []
+        for job in self.video_job_repo.list_processing():
+            if job.external_job_id is None:
+                continue
+            client = self.ai_video_registry.get(job.video_provider)
+            status_result = client.check_status(job.external_job_id)
+
+            if status_result.status == VideoJobStatus.COMPLETED:
+                media_urls = [status_result.video_url] if status_result.video_url else []
+                posts = self.campaign_service.create_campaign_posts(
+                    account_ids=job.account_ids,
+                    content=job.post_caption,
+                    scheduled_at=job.scheduled_at,
+                    media_urls=media_urls,
+                )
+                finished = replace(
+                    job,
+                    status=VideoJobStatus.COMPLETED,
+                    video_url=status_result.video_url,
+                    created_post_ids=[p.id for p in posts],
+                )
+                updated.append(self.video_job_repo.update(finished))
+            elif status_result.status == VideoJobStatus.FAILED:
+                failed = replace(
+                    job,
+                    status=VideoJobStatus.FAILED,
+                    error_message=status_result.error_message,
+                )
+                updated.append(self.video_job_repo.update(failed))
+
+        return updated
+
+    def list_jobs(self) -> list[VideoGenerationJob]:
+        return sorted(self.video_job_repo.list_all(), key=lambda j: j.created_at)
+
+    def get_job(self, job_id: UUID) -> VideoGenerationJob:
+        job = self.video_job_repo.get(job_id)
+        if job is None:
+            raise ValueError("Video generation job not found")
+        return job

@@ -7,14 +7,15 @@ from uuid import UUID
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from .models import PostStatus, Provider
-from .providers import ProviderRegistry
+from .models import PostStatus, Provider, VideoProvider
+from .providers import AiVideoClientRegistry, ProviderRegistry
 from .repositories import (
     InMemoryAccountRepository,
     InMemoryHashtagGroupRepository,
     InMemoryPostRepository,
     InMemoryPostingSlotRepository,
     InMemoryTemplateRepository,
+    InMemoryVideoGenerationJobRepository,
 )
 from .services import (
     AccountService,
@@ -25,18 +26,21 @@ from .services import (
     PublishingService,
     QueuePlannerService,
     TemplateService,
+    VideoGenerationService,
 )
 
 API_KEY = os.getenv("SMM_API_KEY", "dev-key")
 
-app = FastAPI(title="SocialMediaManager API", version="0.4.0")
+app = FastAPI(title="SocialMediaManager API", version="0.5.0")
 
 account_repo = InMemoryAccountRepository()
 post_repo = InMemoryPostRepository()
 template_repo = InMemoryTemplateRepository()
 hashtag_group_repo = InMemoryHashtagGroupRepository()
 posting_slot_repo = InMemoryPostingSlotRepository()
+video_job_repo = InMemoryVideoGenerationJobRepository()
 provider_registry = ProviderRegistry()
+ai_video_registry = AiVideoClientRegistry()
 account_service = AccountService(account_repo)
 post_service = PostService(post_repo)
 template_service = TemplateService(template_repo)
@@ -45,6 +49,7 @@ queue_planner_service = QueuePlannerService(posting_slot_repo)
 campaign_service = CampaignService(post_service)
 publishing_service = PublishingService(account_repo, post_repo, provider_registry)
 analytics_service = AnalyticsService(post_repo, account_repo=account_repo)
+video_generation_service = VideoGenerationService(video_job_repo, ai_video_registry, campaign_service)
 
 
 class AccountCreate(BaseModel):
@@ -117,6 +122,20 @@ class RejectRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class VideoJobCreate(BaseModel):
+    prompt: str = Field(min_length=1, max_length=2000)
+    account_ids: list[UUID] = Field(default_factory=list)
+    post_caption: str = Field(min_length=1, max_length=500)
+    video_provider: VideoProvider = VideoProvider.GENERIC
+    scheduled_at: datetime
+
+
+class VideoProviderRegister(BaseModel):
+    provider: VideoProvider
+    api_url: str = Field(min_length=1)
+    api_key: str = Field(default="")
+
+
 def _append_hashtags(content: str, hashtag_suffix: str) -> str:
     if not hashtag_suffix:
         return content
@@ -141,6 +160,23 @@ def _serialize_post(post) -> dict:
     }
 
 
+def _serialize_video_job(job) -> dict:
+    return {
+        "id": str(job.id),
+        "prompt": job.prompt,
+        "account_ids": [str(aid) for aid in job.account_ids],
+        "post_caption": job.post_caption,
+        "video_provider": job.video_provider.value,
+        "scheduled_at": job.scheduled_at.isoformat(),
+        "status": job.status.value,
+        "video_url": job.video_url,
+        "external_job_id": job.external_job_id,
+        "error_message": job.error_message,
+        "created_at": job.created_at.isoformat(),
+        "created_post_ids": [str(pid) for pid in job.created_post_ids],
+    }
+
+
 def _auth(x_api_key: str | None) -> None:
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -149,6 +185,25 @@ def _auth(x_api_key: str | None) -> None:
 @app.get("/health")
 def health():
     return {"status": "ok", "version": app.version}
+
+
+@app.get("/accounts")
+def list_accounts(x_api_key: str | None = Header(default=None)):
+    _auth(x_api_key)
+    accounts = account_repo.list_all()
+    return {
+        "items": [
+            {
+                "id": str(a.id),
+                "name": a.name,
+                "provider": a.provider.value,
+                "external_account_id": a.external_account_id,
+                "created_at": a.created_at.isoformat(),
+            }
+            for a in accounts
+        ],
+        "count": len(accounts),
+    }
 
 
 @app.post("/accounts")
@@ -370,3 +425,64 @@ def run_publish(x_api_key: str | None = Header(default=None)):
 def analytics_summary(x_api_key: str | None = Header(default=None)):
     _auth(x_api_key)
     return analytics_service.summary()
+
+
+# ---------------------------------------------------------------------------
+# AI Video generation endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/video-providers/register")
+def register_video_provider(payload: VideoProviderRegister, x_api_key: str | None = Header(default=None)):
+    """Register an external AI video generation service by URL and API key."""
+    _auth(x_api_key)
+    ai_video_registry.register_http(
+        provider=payload.provider,
+        api_url=payload.api_url,
+        api_key=payload.api_key,
+    )
+    return {"provider": payload.provider.value, "api_url": payload.api_url}
+
+
+@app.post("/video-jobs")
+def create_video_job(payload: VideoJobCreate, x_api_key: str | None = Header(default=None)):
+    """Submit a new AI video generation job and schedule the result for upload."""
+    _auth(x_api_key)
+    try:
+        job = video_generation_service.create_job(
+            prompt=payload.prompt,
+            account_ids=payload.account_ids,
+            post_caption=payload.post_caption,
+            video_provider=payload.video_provider,
+            scheduled_at=payload.scheduled_at,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _serialize_video_job(job)
+
+
+@app.get("/video-jobs")
+def list_video_jobs(x_api_key: str | None = Header(default=None)):
+    """List all AI video generation jobs."""
+    _auth(x_api_key)
+    jobs = video_generation_service.list_jobs()
+    return {"items": [_serialize_video_job(job) for job in jobs], "count": len(jobs)}
+
+
+@app.get("/video-jobs/{job_id}")
+def get_video_job(job_id: UUID, x_api_key: str | None = Header(default=None)):
+    """Get details of a specific AI video generation job."""
+    _auth(x_api_key)
+    try:
+        job = video_generation_service.get_job(job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _serialize_video_job(job)
+
+
+@app.post("/video-jobs/poll")
+def poll_video_jobs(x_api_key: str | None = Header(default=None)):
+    """Poll all processing video jobs and create posts for completed ones."""
+    _auth(x_api_key)
+    updated = video_generation_service.poll_and_process_jobs(datetime.utcnow())
+    return {"processed": len(updated), "items": [_serialize_video_job(job) for job in updated]}
