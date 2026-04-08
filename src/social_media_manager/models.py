@@ -16,6 +16,7 @@ class Provider(str, Enum):
 class PostStatus(str, Enum):
     DRAFT = "draft"
     IN_REVIEW = "in_review"
+    REJECTED = "rejected"
     APPROVED = "approved"
     SCHEDULED = "scheduled"
     PUBLISHED = "published"
@@ -43,6 +44,36 @@ class Post:
     provider_post_id: Optional[str] = None
     error_message: Optional[str] = None
     retry_count: int = 0
+    labels: list[str] = field(default_factory=list)
+    media_urls: list[str] = field(default_factory=list)
+    first_comment: Optional[str] = None
+    review_comment: Optional[str] = None
+
+
+@dataclass(slots=True)
+class ContentTemplate:
+    name: str
+    body: str
+    default_variables: dict[str, str] = field(default_factory=dict)
+    id: UUID = field(default_factory=uuid4)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass(slots=True)
+class HashtagGroup:
+    name: str
+    hashtags: list[str]
+    id: UUID = field(default_factory=uuid4)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+@dataclass(slots=True)
+class PostingTimeSlot:
+    account_id: UUID
+    weekday: int
+    hour: int
+    minute: int = 0
+    id: UUID = field(default_factory=uuid4)
 
 
 @dataclass(slots=True)

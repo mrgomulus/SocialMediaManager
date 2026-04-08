@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime
 from typing import Optional
@@ -88,17 +89,40 @@ class SQLitePostRepository:
                     published_at TEXT,
                     provider_post_id TEXT,
                     error_message TEXT,
-                    retry_count INTEGER NOT NULL
+                    retry_count INTEGER NOT NULL,
+                    labels TEXT NOT NULL DEFAULT '[]',
+                    media_urls TEXT NOT NULL DEFAULT '[]',
+                    first_comment TEXT,
+                    review_comment TEXT
                 )
                 """
             )
+            self._ensure_columns(conn)
+
+    def _ensure_columns(self, conn) -> None:
+        existing = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(posts)").fetchall()
+        }
+        if "labels" not in existing:
+            conn.execute("ALTER TABLE posts ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'")
+        if "media_urls" not in existing:
+            conn.execute("ALTER TABLE posts ADD COLUMN media_urls TEXT NOT NULL DEFAULT '[]'")
+        if "first_comment" not in existing:
+            conn.execute("ALTER TABLE posts ADD COLUMN first_comment TEXT")
+        if "review_comment" not in existing:
+            conn.execute("ALTER TABLE posts ADD COLUMN review_comment TEXT")
 
     def add(self, post: Post) -> Post:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO posts (id, account_id, content, scheduled_at, status, published_at, provider_post_id, error_message, retry_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO posts (
+                    id, account_id, content, scheduled_at, status, published_at,
+                    provider_post_id, error_message, retry_count, labels, media_urls,
+                    first_comment, review_comment
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(post.id),
@@ -110,6 +134,10 @@ class SQLitePostRepository:
                     post.provider_post_id,
                     post.error_message,
                     post.retry_count,
+                    json.dumps(post.labels),
+                    json.dumps(post.media_urls),
+                    post.first_comment,
+                    post.review_comment,
                 ),
             )
         return post
@@ -119,7 +147,7 @@ class SQLitePostRepository:
             conn.execute(
                 """
                 UPDATE posts
-                SET account_id=?, content=?, scheduled_at=?, status=?, published_at=?, provider_post_id=?, error_message=?, retry_count=?
+                SET account_id=?, content=?, scheduled_at=?, status=?, published_at=?, provider_post_id=?, error_message=?, retry_count=?, labels=?, media_urls=?, first_comment=?, review_comment=?
                 WHERE id=?
                 """,
                 (
@@ -131,6 +159,10 @@ class SQLitePostRepository:
                     post.provider_post_id,
                     post.error_message,
                     post.retry_count,
+                    json.dumps(post.labels),
+                    json.dumps(post.media_urls),
+                    post.first_comment,
+                    post.review_comment,
                     str(post.id),
                 ),
             )
@@ -140,7 +172,7 @@ class SQLitePostRepository:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, account_id, content, scheduled_at, status, published_at, provider_post_id, error_message, retry_count
+                SELECT id, account_id, content, scheduled_at, status, published_at, provider_post_id, error_message, retry_count, labels, media_urls, first_comment, review_comment
                 FROM posts WHERE id=?
                 """,
                 (str(post_id),),
@@ -151,7 +183,7 @@ class SQLitePostRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, account_id, content, scheduled_at, status, published_at, provider_post_id, error_message, retry_count
+                SELECT id, account_id, content, scheduled_at, status, published_at, provider_post_id, error_message, retry_count, labels, media_urls, first_comment, review_comment
                 FROM posts
                 ORDER BY scheduled_at ASC
                 """
@@ -162,7 +194,7 @@ class SQLitePostRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, account_id, content, scheduled_at, status, published_at, provider_post_id, error_message, retry_count
+                SELECT id, account_id, content, scheduled_at, status, published_at, provider_post_id, error_message, retry_count, labels, media_urls, first_comment, review_comment
                 FROM posts
                 WHERE status = ? AND scheduled_at <= ?
                 ORDER BY scheduled_at ASC
@@ -184,4 +216,19 @@ class SQLitePostRepository:
             provider_post_id=row[6],
             error_message=row[7],
             retry_count=row[8],
+            labels=self._decode_json_list(row[9]),
+            media_urls=self._decode_json_list(row[10]),
+            first_comment=row[11],
+            review_comment=row[12],
         )
+
+    def _decode_json_list(self, raw: str | None) -> list[str]:
+        if not raw:
+            return []
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(decoded, list):
+            return []
+        return [str(item) for item in decoded]

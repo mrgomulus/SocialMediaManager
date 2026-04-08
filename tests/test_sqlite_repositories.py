@@ -26,22 +26,30 @@ def test_sqlite_account_and_post_roundtrip(tmp_path):
         content="Persist me",
         scheduled_at=datetime.utcnow() + timedelta(minutes=5),
         status=PostStatus.SCHEDULED,
+        labels=["launch"],
+        media_urls=["https://cdn.example.com/a.png"],
+        first_comment="First!",
     )
     post_repo.add(post)
 
     loaded_post = post_repo.get(post.id)
     assert loaded_post is not None
     assert loaded_post.status == PostStatus.SCHEDULED
+    assert loaded_post.labels == ["launch"]
+    assert loaded_post.media_urls == ["https://cdn.example.com/a.png"]
+    assert loaded_post.first_comment == "First!"
 
     post.status = PostStatus.FAILED
     post.scheduled_at = datetime.utcnow() + timedelta(minutes=15)
     post.retry_count = 2
+    post.review_comment = "Need rewrite"
     post_repo.update(post)
 
     updated = post_repo.get(post.id)
     assert updated is not None
     assert updated.status == PostStatus.FAILED
     assert updated.retry_count == 2
+    assert updated.review_comment == "Need rewrite"
 
     due = post_repo.list_due(datetime.utcnow() + timedelta(hours=1))
     assert len(due) == 0
