@@ -11,6 +11,25 @@ class Provider(str, Enum):
     POSTIZ_INSPIRED = "postiz_inspired"
     MIXPOST_INSPIRED = "mixpost_inspired"
     GENERIC = "generic"
+    YOUTUBE = "youtube"
+    TIKTOK = "tiktok"
+    INSTAGRAM = "instagram"
+    TWITTER = "twitter"
+    FACEBOOK = "facebook"
+    LINKEDIN = "linkedin"
+
+
+class VideoProvider(str, Enum):
+    RUNWAY = "runway"
+    PIKA = "pika"
+    GENERIC = "generic"
+
+
+class VideoJobStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class PostStatus(str, Enum):
@@ -81,3 +100,33 @@ class PublishResult:
     success: bool
     provider_post_id: Optional[str] = None
     error_message: Optional[str] = None
+
+
+@dataclass(slots=True)
+class AiVideoSubmitResult:
+    success: bool
+    external_job_id: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@dataclass(slots=True)
+class AiVideoStatusResult:
+    status: VideoJobStatus
+    video_url: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+@dataclass(slots=True)
+class VideoGenerationJob:
+    prompt: str
+    account_ids: list[UUID]
+    post_caption: str
+    video_provider: VideoProvider
+    scheduled_at: datetime
+    id: UUID = field(default_factory=uuid4)
+    status: VideoJobStatus = VideoJobStatus.PENDING
+    video_url: Optional[str] = None
+    external_job_id: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_post_ids: list[UUID] = field(default_factory=list)
