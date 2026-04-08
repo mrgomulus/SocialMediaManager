@@ -12,6 +12,8 @@ from .models import (
     Post,
     PostStatus,
     PostingTimeSlot,
+    VideoGenerationJob,
+    VideoGenerationStatus,
 )
 
 
@@ -106,3 +108,25 @@ class InMemoryPostingSlotRepository:
 
     def list_for_account(self, account_id: UUID) -> List[PostingTimeSlot]:
         return list(self._items.get(account_id, []))
+
+
+class InMemoryVideoJobRepository:
+    def __init__(self) -> None:
+        self._items: Dict[UUID, VideoGenerationJob] = {}
+
+    def add(self, job: VideoGenerationJob) -> VideoGenerationJob:
+        self._items[job.id] = job
+        return job
+
+    def update(self, job: VideoGenerationJob) -> VideoGenerationJob:
+        self._items[job.id] = job
+        return job
+
+    def get(self, job_id: UUID) -> Optional[VideoGenerationJob]:
+        return self._items.get(job_id)
+
+    def list_all(self) -> List[VideoGenerationJob]:
+        return list(self._items.values())
+
+    def list_by_status(self, status: VideoGenerationStatus) -> List[VideoGenerationJob]:
+        return [job for job in self._items.values() if job.status == status]

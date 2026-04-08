@@ -13,8 +13,10 @@ from .models import (
     PostStatus,
     PostingTimeSlot,
     Provider,
+    VideoGenerationJob,
+    VideoGenerationStatus,
 )
-from .providers import ProviderRegistry
+from .providers import ProviderRegistry, VideoGenerationProviderRegistry
 
 MAX_RETRIES = 3
 MAX_CONTENT_LENGTH = 280
@@ -459,3 +461,140 @@ class AnalyticsService:
             "upcoming_posts_24h": upcoming_posts_24h,
             "by_provider": by_provider,
         }
+
+
+class VideoGenerationService:
+    """Coordinates AI video generation and automatic publishing to social media channels."""
+
+    def __init__(
+        self,
+        job_repo,
+        post_service: PostService,
+        video_provider_registry: VideoGenerationProviderRegistry,
+        *,
+        video_provider_name: str = "generic",
+    ) -> None:
+        self.job_repo = job_repo
+        self.post_service = post_service
+        self.video_provider_registry = video_provider_registry
+        self.video_provider_name = video_provider_name
+
+    def create_job(
+        self,
+        *,
+        prompt: str,
+        account_ids: list,
+        post_content: str,
+        scheduled_publish_at: datetime | None = None,
+        labels: list[str] | None = None,
+    ) -> VideoGenerationJob:
+        prompt = prompt.strip()
+        if not prompt:
+            raise ValueError("Prompt must not be empty")
+        post_content = post_content.strip()
+        if not post_content:
+            raise ValueError("Post content must not be empty")
+        if len(post_content) > MAX_CONTENT_LENGTH:
+            raise ValueError(f"Post content must be <= {MAX_CONTENT_LENGTH} characters")
+        unique_accounts = list(dict.fromkeys(account_ids))
+        if not unique_accounts:
+            raise ValueError("At least one account_id is required")
+        job = VideoGenerationJob(
+            prompt=prompt,
+            account_ids=unique_accounts,
+            post_content=post_content,
+            scheduled_publish_at=scheduled_publish_at,
+            labels=labels or [],
+        )
+        return self.job_repo.add(job)
+
+    def process_pending_jobs(self, now: datetime) -> list[VideoGenerationJob]:
+        """Submit all PENDING jobs to the AI video provider."""
+        client = self.video_provider_registry.get(self.video_provider_name)
+        updated: list[VideoGenerationJob] = []
+        for job in self.job_repo.list_by_status(VideoGenerationStatus.PENDING):
+            result = client.create_video(job)
+            if result.success and result.is_complete:
+                updated_job = replace(
+                    job,
+                    status=VideoGenerationStatus.COMPLETED,
+                    video_url=result.video_url,
+                    provider_job_id=result.provider_job_id,
+                    completed_at=now,
+                )
+            elif result.success:
+                updated_job = replace(
+                    job,
+                    status=VideoGenerationStatus.PROCESSING,
+                    provider_job_id=result.provider_job_id,
+                )
+            else:
+                updated_job = replace(
+                    job,
+                    status=VideoGenerationStatus.FAILED,
+                    error_message=result.error_message,
+                )
+            updated.append(self.job_repo.update(updated_job))
+        return updated
+
+    def poll_processing_jobs(self, now: datetime) -> list[VideoGenerationJob]:
+        """Poll PROCESSING jobs to check whether video generation is complete."""
+        client = self.video_provider_registry.get(self.video_provider_name)
+        updated: list[VideoGenerationJob] = []
+        for job in self.job_repo.list_by_status(VideoGenerationStatus.PROCESSING):
+            if job.provider_job_id is None:
+                continue
+            result = client.check_status(job.provider_job_id)
+            if result.is_complete and result.success:
+                updated_job = replace(
+                    job,
+                    status=VideoGenerationStatus.COMPLETED,
+                    video_url=result.video_url,
+                    completed_at=now,
+                )
+                updated.append(self.job_repo.update(updated_job))
+            elif not result.success:
+                updated_job = replace(
+                    job,
+                    status=VideoGenerationStatus.FAILED,
+                    error_message=result.error_message,
+                )
+                updated.append(self.job_repo.update(updated_job))
+        return updated
+
+    def auto_publish_completed_jobs(self, now: datetime) -> list[Post]:
+        """Publish all COMPLETED video jobs whose scheduled_publish_at has arrived."""
+        published: list[Post] = []
+        for job in self.job_repo.list_by_status(VideoGenerationStatus.COMPLETED):
+            if job.video_url is None:
+                continue
+            if job.scheduled_publish_at is not None and job.scheduled_publish_at > now:
+                continue
+            if job.published_post_ids:
+                continue
+            post_ids: list[UUID] = []
+            for account_id in job.account_ids:
+                try:
+                    post = self.post_service.create_scheduled_post(
+                        account_id=account_id,
+                        content=job.post_content,
+                        scheduled_at=now + timedelta(seconds=1),
+                        labels=job.labels,
+                        media_urls=[job.video_url],
+                    )
+                    post_ids.append(post.id)
+                    published.append(post)
+                except ValueError:
+                    continue
+            if post_ids:
+                self.job_repo.update(replace(job, published_post_ids=post_ids))
+        return published
+
+    def get_job(self, job_id) -> VideoGenerationJob | None:
+        return self.job_repo.get(job_id)
+
+    def list_jobs(self, *, status: VideoGenerationStatus | None = None) -> list[VideoGenerationJob]:
+        jobs = self.job_repo.list_all()
+        if status is not None:
+            jobs = [j for j in jobs if j.status == status]
+        return sorted(jobs, key=lambda j: j.created_at)
